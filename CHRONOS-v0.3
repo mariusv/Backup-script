@@ -1,0 +1,356 @@
+#!/bin/sh
+#########################################################################
+#                                                                       #
+#                    CHRONOS - Backup Shell Script                      #
+#                                                                       #
+#########################################################################
+#                                                                       #
+# Description : This script perform different types of backups on a     #
+#               local computer. It is designed to be launched in        #
+#               command line, and can also be executed in a cron job    #
+#               or copied in a directory such as 'cron.daily' for an    #
+#               automatic execution.                                    #
+#                                                                       #
+#########################################################################
+#                                                                       #
+# Features : * Backup selected files and directories                    #
+#            * Backup users's homes (full or only hidden configuration  #
+#              files)                                                   #
+#            * Backup the list installed packages (Debian/Ubuntu)       #
+#            * Backup MySQL databases (all, local server)               #
+#            * Encrypt the archive (using GPG)                          #
+#            * Upload archive via FTP                                   #
+#            * Upload archive via SCP                                   #
+#            * Send a report by email                                   #
+#                                                                       #
+#             ! Each feature can be activated separately !              #
+#             !   depending on the configuration below   !              #
+#                                                                       #
+#########################################################################
+#                                                                       #
+#                             NEW in v0.3                               #
+#                                                                       #
+# * Added option to send a report by email.                             #
+# * Added the choice to backup full users' home directories or only     #
+#   the hidden configuration files.                                     #
+#                                                                       #
+#########################################################################
+#                                                                       #
+#                             NEW in v0.2                               #
+#                                                                       #
+# * Using also the time, on top of the date, for the archive name       #
+#   in case of more than one backup performed per day (But this can be  #
+#   personalized in the options below).                                 #
+# * Added verbosity levels for the logs (3 levels).                     #
+# * Added option to log on console and/or syslog or not.                #
+#                                                                       #
+#########################################################################
+#                                                                       #
+# Requires : tar, gzip, mysqldump(*), ftp-upload(*), scp(*), logger(*)  #
+#            gpg(*), dpkg(*), mail(*)                                   #
+#            (*) optional: only if needed (depending on the selected    #
+#                options).                                              #
+#                                                                       #
+#########################################################################
+SCRIPTNAME="CHRONOS";
+VERSION="v0.3";
+RELEASEDATE="2010-04-14";
+AUTHOR="Marius Voila (marius.voila@gmail.com)";
+#########################################################################
+#                                                                       #
+# # # # # # # # # # DEFINE BELOW THE DIFFERENT PARAMETERS # # # # # # # #
+#                                                                       #
+#########################################################################
+#
+SERVERNAME="server"; # Used to name the backup file to be unique if multiple servers are backed up
+LOCALTMPDIR="/tmp"; # Local directory used to work
+#
+#
+# Shall I backup files and directories?
+# Define files/dirs to backup in $FILES_AND_DIRS_TO_BACKUP
+BACKUP_FILES=0;
+FILES_AND_DIRS_TO_BACKUP="/etc /var/log";
+#
+# Shall I backup user's homes? # 0=no # 1=only hidden conf files # 2=full backup
+# Define root homes directories in $ROOT_OF_HOMES
+BACKUP_HOMES=0;
+ROOT_OF_HOMES="/home";
+#
+# Shall I backup all the MySQL databases? (local server only)
+# Define also the user account (user/password) to run mysqldump
+DUMP_MYSQL=0;
+MYSQLUSER="user";
+MYSQLPW="password";
+#
+# Shall I get the current installed packages list? (Debian / Ubuntu)
+# This can be useful to reinstall the machine whith the same package list
+DUMP_DEBIAN_INSTALLED_PACKAGES=0;
+#
+# Shall I encrypt the final archive?
+# GPGKEYID is the ID of the GPG key used to encrypt. Can be found using : gpg --list-keys
+# If no key are present, then you need to create a pair of key (public/private)
+# using : gpg --gen-key
+ENCRYPT_ARCHIVE=0;
+GPGKEYID="FFFFFFFF";
+#
+# Shall I upload the final archive via FTP and/or via SCP ?
+# For SCP, if you want to run the backup via a cron job, you need to enable
+# the SSH certificate authentication to prevent password prompting.
+UPLOAD_FTP=0;
+FTPSERVER="ftp.server.com";
+FTPUSER="user";
+FTPPWD="password";
+REMOTEFTPDIR="/dir";
+UPLOAD_SCP=0;
+SCPSERVER="server";
+SCPUSER="user";
+REMOTESCPDIR="/dir";
+SCPOPTIONS="-q";
+#
+# Shall I delete the local archive file (in $LOCALTMPDIR directory) ? 
+# (useful, for example, after uploading)
+# Shall I delete each files after archive them in the main archive file?
+DELETE_LOCAL_ARCHIVE_AFTER_UPLOAD=0;
+CLEAN_TMP=1;
+#
+# Shall I log the events?
+LOGSYSLOG=1; # Write log in syslog
+LOGCONSOLE=1; # Write log to console
+#
+# Shall I mail the events?
+LOGEMAIL=0;
+LOGEMAILTO="user@domain.com";
+#
+# Verbosity of the logs 
+# 1 = begin + end
+# 2 = begin + steps + end
+# 3 = begin  + steps + step details + end
+LOGVERBOSE=3;
+#
+# The date is also used to name the archive. You can choose to use
+# only the date of the day if you make only one backup per day, or
+# also the time if you make more than one backup per day.
+LADATE="`date '+%y%m%d'`.`date '+%H%M%S'`";
+#LADATE=`date '+%y%m%d'`; # If you make only one backup per day
+#
+# Other parameters
+# You don't need to change something here, except if you really
+# want to personalize some aspects
+EXTTAR="tar"; # Extention used for the archive file
+EXTMYSQL="mysql.sql"; # Extention used for the mysql dump file
+EXTGZIP="gz"; # Extention used for the gunzip file
+EXTGPG="gpg"; # Extention used to create the gpg encrypted file
+EXTDPKG="dpkg.list"; # Extention used for the dpkg list  file
+EXTLOG="log"; # Extension used for the log file (used for emailing)
+
+
+
+
+############################################################################################
+############################################################################################
+################ !!  You don't need to edit something under this line !!  ##################
+############################################################################################
+############################################################################################
+
+
+
+
+
+#########################################################################
+#                             BASIC FUNCTIONS                           #
+#########################################################################
+
+get_file_size() {
+ FILESIZE=$(stat -c%s "$1")
+ UNIT="o";
+ if [ $FILESIZE -gt 1024 ]; then
+  FORMATEDSIZE=$(echo "scale=2;$FILESIZE/1024" | bc)
+  UNIT="Ko";
+ fi;
+ if [ $FILESIZE -gt 1048576 ]; then
+  FORMATEDSIZE=$(echo "scale=2;$FILESIZE/1048576" | bc)
+  UNIT="Mo";
+ fi;
+ if [ $FILESIZE -gt 1073741824 ]; then
+  FORMATEDSIZE=$(echo "scale=2;$FILESIZE/1073741824" | bc)
+  UNIT="Go";
+ fi;
+ FORMATEDFILESIZE=$FORMATEDSIZE$UNIT;
+}
+
+convert_timestamp() {
+ TIMESTAMP=$1;
+ HOUR=$(($TIMESTAMP/3600%24));
+ MIN=$(($TIMESTAMP/60%60));
+ SEC=$(($TIMESTAMP%60));
+ FORMATEDTIME=$HOUR"h"$MIN"m"$SEC"s";
+}
+
+write_log() {
+ VERB=$1
+ MESSTOWRITE="$2";
+ if [ $VERB -le $LOGVERBOSE ]; then
+  if [ ! $LOGSYSLOG == 0 ]; then
+   logger $MESSTOWRITE;
+  fi;
+  if [ ! $LOGCONSOLE == 0 ] || [ $VERB == 0 ] ; then
+   echo "`date '+%H:%M:%S'`: $MESSTOWRITE";
+  fi;
+  if [ ! $LOGEMAIL == 0 ]; then
+   echo "`date '+%H:%M:%S'`: $MESSTOWRITE" >> $ARCHIVEFILE.$EXTLOG;
+  fi;
+ fi;
+}
+
+
+#########################################################################
+#                         CHRONOS   FUNCTIONS                           #
+#########################################################################
+
+chro_begin_backup() { 
+ STARTCHRONO=`date '+%s'`;
+ ARCHIVEFILE=$LOCALTMPDIR/$SERVERNAME-$LADATE;
+ write_log 1 "$SCRIPTNAME v$VERSION ($RELEASEDATE) processing backup..."; 
+}
+
+chro_check_options() { ### Check backup jobs
+if [ $(($BACKUP_FILES+$DUMP_MYSQL+$DUMP_DEBIAN_INSTALLED_PACKAGES+$BACKUP_HOMES)) == 0 ]; then
+ write_log 0 "No job activated. No backup performed. Check the options."; printf "\n"; 
+ exit 0;
+fi;
+}
+
+chro_create_archive_file() { ### Create Archive
+ write_log 2 "Creating archive file `basename "$ARCHIVEFILE.$EXTTAR"`...";
+ touch $ARCHIVEFILE.$EXTTAR
+ EXTTOUPLOAD=$EXTTAR;
+}
+
+chro_backup_files_and_dir() { ### Backup files and dirs defined in $FILES_AND_DIRS_TO_BACKUP
+ write_log 2 "Archiving files in `basename "$ARCHIVEFILE.$EXTTAR"`...";
+ tar -cpf $ARCHIVEFILE.$EXTTAR $FILES_AND_DIRS_TO_BACKUP &> /dev/null 
+}
+
+chro_backup_homes () { ### Backup users' home directories
+ write_log 2 "Backing up homes...";
+ for i in $( ls $ROOT_OF_HOMES ); do
+  BACKUPHOMEFILE=$ARCHIVEFILE-homeof-$i.$EXTTAR.$EXTGZIP;
+  if [ $BACKUP_HOMES == 1 ]; then
+   write_log 3 "Backing up hidden configuration files of ["$i"] home...";
+   tar -zcpf $BACKUPHOMEFILE $ROOT_OF_HOMES/$i/.* --exclude . --exclude .. --exclude ^. &> /dev/null
+  elif [ $BACKUP_HOMES == 2 ]; then
+   write_log 3 "Backing up full home of ["$i"]...";
+   tar -zcpf $BACKUPHOMEFILE $ROOT_OF_HOMES/$i &> /dev/null
+  fi;
+  write_log 3 "Archiving `basename "$BACKUPHOMEFILE"`...";
+  tar -rf $ARCHIVEFILE.$EXTTAR $BACKUPHOMEFILE &> /dev/null
+  if [ ! $CLEAN_TMP == 0 ]; then
+   write_log 3 "Deleting `basename "$BACKUPHOMEFILE"`...";
+   rm $BACKUPHOMEFILE
+  fi;
+ done
+}
+
+chro_dump_dpkg() { ### Dump Debian Installed Packages
+ write_log 2 "Writing Debian packages list in `basename "$ARCHIVEFILE.$EXTDPKG"`...";
+ dpkg --get-selections > $ARCHIVEFILE.$EXTDPKG
+ write_log 3 "Archiving `basename "$ARCHIVEFILE.$EXTDPKG"`...";
+ tar -rf $ARCHIVEFILE.$EXTTAR $ARCHIVEFILE.$EXTDPKG &> /dev/null
+ if [ ! $CLEAN_TMP == 0 ]; then
+  write_log 3 "Deleting `basename "$ARCHIVEFILE.$EXTDPKG"`...";
+  rm $ARCHIVEFILE.$EXTDPKG
+ fi;
+}
+
+chro_dump_mysql() { ### Dump MySQL
+ write_log 2 "Dumping MySQL databases in `basename "$ARCHIVEFILE.$EXTMYSQL"`...";
+ mysqldump -u $MYSQLUSER --password=$MYSQLPW --all-databases > $ARCHIVEFILE.$EXTMYSQL
+ write_log 3 "Archiving `basename "$ARCHIVEFILE.$EXTMYSQL"`...";
+ tar -rf $ARCHIVEFILE.$EXTTAR $ARCHIVEFILE.$EXTMYSQL &> /dev/null
+ if [ ! $CLEAN_TMP == 0 ]; then
+  write_log 3 "Deleting `basename "$ARCHIVEFILE.$EXTMYSQL"`...";
+  rm $ARCHIVEFILE.$EXTMYSQL
+ fi;
+}
+
+chro_compress_archive() { ### Compress Archive
+ write_log 2 "Compressing archive file to `basename "$ARCHIVEFILE.$EXTTAR.$EXTGZIP"`...";
+ gzip -q $ARCHIVEFILE.$EXTTAR
+ EXTTOUPLOAD=$EXTTAR.$EXTGZIP;
+}
+
+chro_encrypt() { ### Encrypt archive
+ write_log 2 "Encrypting compressed archive to `basename "$ARCHIVEFILE.$EXTGPG"`...";
+ gpg -r $GPGKEYID -e -a -o $ARCHIVEFILE.$EXTGPG $ARCHIVEFILE.$EXTTAR.$EXTGZIP
+ if [ ! $CLEAN_TMP == 0 ]; then
+  write_log 3 "Deleting `basename "$ARCHIVEFILE.$EXTTAR.$EXTGZIP"`...";
+  rm $ARCHIVEFILE.$EXTTAR.$EXTGZIP
+ fi;
+ EXTTOUPLOAD=$EXTGPG;
+}
+
+chro_upload_ftp() { ### Upload FTP
+ write_log 2 "Uploading (FTP) ["`basename "$ARCHIVEFILE.$EXTTOUPLOAD"`"] to "$FTPSERVER" in "$REMOTEFTPDIR"...";
+ ftp-upload -h $FTPSERVER -d $REMOTEFTPDIR -u $FTPUSER --password $FTPPWD $ARCHIVEFILE.$EXTTOUPLOAD
+}
+
+chro_upload_scp() { ### Upload SCP
+ write_log 2 "Uploading (SCP) ["`basename "$ARCHIVEFILE.$EXTTOUPLOAD"`"] to "$SCPSERVER" in "$REMOTESCPDIR"...";
+ scp $SCPOPTIONS $ARCHIVEFILE.$EXTTOUPLOAD $SCPUSER@$SCPSERVER:$REMOTESCPDIR
+}
+
+chro_delete_local_archive() { ### Delete local archive
+ write_log 2 "Deleting `basename "$ARCHIVEFILE.$ARCHIVEFILE.$EXTTOUPLOAD"`...";
+ rm $ARCHIVEFILE.$EXTTOUPLOAD
+}
+
+chro_show_stats () { ### Show stats
+ STOPCHRONO=`date '+%s'`;
+ EXECTIME=$(($STOPCHRONO-$STARTCHRONO));
+ convert_timestamp $EXECTIME;
+ write_log 1 "End of backup. $ARCHIVESIZE backed up (Archive size : $UPLOADEDARCHIVESIZE). Took $FORMATEDTIME ($EXECTIME seconds).";
+}
+
+chro_mailing_logs() { ### send the logs via email
+ mail -s "CHRONOS report on [$SERVERNAME]" $LOGEMAILTO <$ARCHIVEFILE.$EXTLOG
+ if [ ! $CLEAN_TMP == 0 ]; then
+  rm $ARCHIVEFILE.$EXTLOG
+ fi;
+}
+
+
+#########################################################################
+#                                PROCESSING                             #
+#########################################################################
+
+
+chro_begin_backup;
+chro_check_options;
+chro_create_archive_file;
+
+if [ ! $BACKUP_FILES == 0 ]; then chro_backup_files_and_dir; fi;
+if [ ! $BACKUP_HOMES == 0 ]; then chro_backup_homes; fi;
+if [ ! $DUMP_DEBIAN_INSTALLED_PACKAGES == 0 ]; then chro_dump_dpkg; fi;
+if [ ! $DUMP_MYSQL == 0 ]; then chro_dump_mysql; fi;
+
+get_file_size $ARCHIVEFILE.$EXTTAR;
+ARCHIVESIZE=$FORMATEDFILESIZE;
+
+chro_compress_archive;
+
+if [ ! $ENCRYPT_ARCHIVE == 0 ]; then chro_encrypt; fi;
+
+get_file_size $ARCHIVEFILE.$EXTTOUPLOAD;
+UPLOADEDARCHIVESIZE=$FORMATEDFILESIZE;
+
+if [ ! $UPLOAD_FTP == 0 ]; then chro_upload_ftp; fi;
+if [ ! $UPLOAD_SCP == 0 ]; then chro_upload_scp; fi;
+if [ ! $DELETE_LOCAL_ARCHIVE_AFTER_UPLOAD == 0 ]; then chro_delete_local_archive; fi;
+
+chro_show_stats;
+
+if [ ! $LOGEMAIL == 0 ]; then chro_mailing_logs; fi;
+
+#########################################################################
+#                             END OF SCRIPT                             #
+#########################################################################

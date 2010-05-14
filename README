@@ -1,0 +1,20 @@
+CHRONOS is a shell script, designed to perform different backups on a local computer. It makes a compressed archive of all backup selected in the configuration. It can also encrypt the archive, and upload it on a FTP server, or copy it via SCP.
+
+This script is designed to be executed in command line, or via a cron job. You can also copy it into /etc/cron.daily for a daily execution.
+
+
+Features (can be activated separately) :
+
+    * Backup a selection of files and/or directories.
+    * Backup MySQL databases.
+    * Backup users' homes directories (full or only hidden configuration files).
+    * Backup the list of installed packages (Debian / Ubuntu).
+    * Encrypt the final archive using GPG.
+    * Upload final archive via FTP (using ftp-upload) and/or SCP.
+    * Send a report by email.
+
+Installation :
+
+    * Download and gunzip the archive.
+    * Edit the script to set the differents options.
+    * Turn the script executable (chmod +x)
